@@ -49,9 +49,10 @@ SHEET_CSV_URL  = os.environ["SHEET_CSV_URL"]
 PUBLIC_URL     = os.environ.get("PUBLIC_URL", "")
 
 # ─── Индексы колонок (0-based) ────────────────────────────────────────────────
-# B=1 Проект, F=5 AWB/Flight No., O=14 ATA with time
+# B=1 Проект, F=5 AWB/Flight No., J=9 Дробление, O=14 ATA with time
 COL_PROJECT = 1
 COL_AWB     = 5
+COL_SPLIT   = 9   # J — Дробление ("Да" = сплит партия)
 COL_ETA     = 14
 
 # ─── Фильтр по проекту ───────────────────────────────────────────────────────
@@ -113,21 +114,31 @@ def parse_date(val: str) -> date | None:
     return None
 
 
+# ─── Форматирование ATA для отображения ──────────────────────────────────────
+def fmt_ata(dt) -> str:
+    # пример: 15.04 в 20:40
+    if dt is None:
+        return ""
+    return dt.strftime("%d.%m в %H:%M")
+
+
 # ─── Формирование сводки ──────────────────────────────────────────────────────
 def build_report(rows: list[list[str]], report_dt: datetime, project: str, project_name: str) -> str:
     """
     Окно «прибывших»: от вчерашних 12:00 до сегодняшних 12:00 (Ташкент).
 
-    ATA в окне             → ✅ Прибыли сегодня
-    ATA пустая / > 12:00   → ⏳ Ожидаются (с ETA из колонки N)
-    ATA < вчера 12:00      → не показываем (уже было в прошлых сводках)
+    ATA в окне                   → ✅ Прибыли в Ташкент (с датой ATA)
+    ATA пустая / > report_dt     → ⏳ Ожидаются (с ETA из колонки N)
+    ATA < вчера 12:00            → не показываем (уже было в прошлых сводках)
+    Дробление = Да               → сплит партия, показываем по частям
     """
-    # Границы окна
     prev_report_dt = report_dt - timedelta(days=1)  # вчера 12:00
 
-    arrived: list[str] = []
-    pending: list[tuple[str, str]] = []
+    arrived_lines: list[str] = []
+    pending_lines: list[str] = []
     seen: set[str] = set()
+    # split_groups: awb -> [(ata_dt, eta_display), ...] в порядке строк таблицы
+    split_groups: dict[str, list] = {}
 
     for i, row in enumerate(rows):
         if i == 0:
@@ -138,46 +149,67 @@ def build_report(rows: list[list[str]], report_dt: datetime, project: str, proje
             continue
 
         awb = row[COL_AWB].strip()
-        if not awb or awb in seen:
+        if not awb:
             continue
-        seen.add(awb)
 
         ata_raw = row[COL_ETA].strip() if len(row) > COL_ETA else ""
         ata_dt = parse_ata(ata_raw)
 
-        # ETA (колонка N=13) — плановая дата/время, показываем рядом с AWB
+        # ETA (колонка N=13) — плановая дата/время для отображения
         eta_display = ""
         if len(row) > 13 and row[13].strip():
             eta_display = row[13].strip()
 
+        # Сплит партия?
+        is_split = len(row) > COL_SPLIT and row[COL_SPLIT].strip().lower() == "да"
+        if is_split:
+            if awb not in split_groups:
+                split_groups[awb] = []
+            split_groups[awb].append((ata_dt, eta_display))
+            continue
+
+        # Обычная партия — дедупликация по AWB
+        if awb in seen:
+            continue
+        seen.add(awb)
+
         if ata_dt is None:
-            # ATA не заполнена — партия ещё в пути
-            pending.append((awb, eta_display))
+            suffix = f"  _(ETA: {eta_display})_" if eta_display else ""
+            pending_lines.append(f"  • {awb}{suffix}")
         elif prev_report_dt < ata_dt <= report_dt:
-            # Прибыла в окне: вчера 12:00 — сегодня 12:00
-            arrived.append(awb)
+            arrived_lines.append(f"  • {awb}  _({fmt_ata(ata_dt)})_")
         elif ata_dt > report_dt:
-            # Прилетит после текущего отчёта — в ожидаемых
-            pending.append((awb, eta_display))
+            suffix = f"  _(ETA: {eta_display})_" if eta_display else ""
+            pending_lines.append(f"  • {awb}{suffix}")
         # ata_dt <= prev_report_dt → уже показывали, пропускаем
+
+    # Обработка сплит партий
+    for awb, parts in split_groups.items():
+        total = len(parts)
+        for part_num, (ata_dt, eta_display) in enumerate(parts, start=1):
+            suffix = f"  _(ETA: {eta_display})_" if eta_display else ""
+            if ata_dt is None:
+                pending_lines.append(f"  • {awb} — ожидается часть {part_num}/{total}{suffix}")
+            elif prev_report_dt < ata_dt <= report_dt:
+                arrived_lines.append(f"  • {awb} — часть {part_num}/{total} прибыла {fmt_ata(ata_dt)}")
+            elif ata_dt > report_dt:
+                pending_lines.append(f"  • {awb} — ожидается часть {part_num}/{total}{suffix}")
+            # ata_dt <= prev_report_dt → уже показывали, пропускаем
 
     date_str = report_dt.strftime("%d.%m.%Y")
     lines = [f"📦 *{project_name}* — сводка по партиям на {date_str}\n"]
 
-    if arrived:
-        lines.append("✅ *Прибыли сегодня:*")
-        for awb in arrived:
-            lines.append(f"  • {awb}")
+    if arrived_lines:
+        lines.append("✅ *Прибыли в Ташкент:*")
+        lines.extend(arrived_lines)
     else:
-        lines.append("✅ *Прибыли сегодня:* нет")
+        lines.append("✅ *Прибыли в Ташкент:* нет")
 
     lines.append("")
 
-    if pending:
+    if pending_lines:
         lines.append("⏳ *Ещё не прибыли (ожидаются):*")
-        for awb, eta_d in pending:
-            suffix = f"  _(ETA: {eta_d})_" if eta_d else ""
-            lines.append(f"  • {awb}{suffix}")
+        lines.extend(pending_lines)
     else:
         lines.append("⏳ *Ожидаемых партий нет*")
 
