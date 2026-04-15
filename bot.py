@@ -99,7 +99,9 @@ def parse_date(val: str) -> date | None:
 # ─── Формирование сводки ──────────────────────────────────────────────────────
 def build_report(rows: list[list[str]], today: date, project: str, project_name: str) -> str:
     arrived: list[str] = []
-    pending: list[str] = []
+    # pending хранит (awb, eta_str) для показа даты ETA рядом с номером
+    pending: list[tuple[str, str]] = []
+    seen: set[str] = set()  # для дедупликации по AWB
 
     for i, row in enumerate(rows):
         if i == 0:
@@ -110,15 +112,23 @@ def build_report(rows: list[list[str]], today: date, project: str, project_name:
             continue
 
         awb = row[COL_AWB].strip()
-        if not awb:
+        if not awb or awb in seen:
             continue
+        seen.add(awb)
 
-        eta_raw = row[COL_ETA].strip() if len(row) > COL_ETA else ""
-        eta = parse_date(eta_raw)
+        ata_raw = row[COL_ETA].strip() if len(row) > COL_ETA else ""
+        ata = parse_date(ata_raw)
 
-        if eta is None:
-            pending.append(awb)
-        elif eta == today:
+        # ETA (колонка N=13) — плановая дата, показываем рядом с AWB в ожидаемых
+        eta_display = ""
+        if len(row) > 13:
+            eta_val = row[13].strip()
+            if eta_val:
+                eta_display = eta_val
+
+        if ata is None:
+            pending.append((awb, eta_display))
+        elif ata == today:
             arrived.append(awb)
 
     date_str = today.strftime("%d.%m.%Y")
@@ -135,8 +145,9 @@ def build_report(rows: list[list[str]], today: date, project: str, project_name:
 
     if pending:
         lines.append("⏳ *Ещё не прибыли (ожидаются):*")
-        for awb in pending:
-            lines.append(f"  • {awb}")
+        for awb, eta_d in pending:
+            suffix = f"  _(ETA: {eta_d})_" if eta_d else ""
+            lines.append(f"  • {awb}{suffix}")
     else:
         lines.append("⏳ *Ожидаемых партий нет*")
 
