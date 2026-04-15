@@ -49,10 +49,10 @@ SHEET_CSV_URL  = os.environ["SHEET_CSV_URL"]
 PUBLIC_URL     = os.environ.get("PUBLIC_URL", "")
 
 # ─── Индексы колонок (0-based) ────────────────────────────────────────────────
-# B=1 Проект, F=5 AWB/Flight No., N=13 ETA
+# B=1 Проект, F=5 AWB/Flight No., O=14 ATA with time
 COL_PROJECT = 1
 COL_AWB     = 5
-COL_ETA     = 13
+COL_ETA     = 14
 
 # ─── Фильтр по проекту ───────────────────────────────────────────────────────
 UCB_VALUES   = {"uzum mko", "uzum dg"}
