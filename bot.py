@@ -88,6 +88,8 @@ def parse_date(val: str) -> date | None:
     val = val.strip()
     if not val:
         return None
+    # Убираем временную часть если есть: "12.04.2026 14:30:00" → "12.04.2026"
+    val = val.split()[0]
     for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
         try:
             return datetime.strptime(val, fmt).date()
