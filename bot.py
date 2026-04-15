@@ -22,7 +22,7 @@ import logging
 import asyncio
 import threading
 import urllib.request
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import StringIO
 from zoneinfo import ZoneInfo
@@ -83,13 +83,28 @@ def fetch_rows() -> list[list[str]]:
     return list(reader)
 
 
-# ─── Парсинг даты ─────────────────────────────────────────────────────────────
-def parse_date(val: str) -> date | None:
+# ─── Парсинг даты/времени ────────────────────────────────────────────────────
+def parse_ata(val: str):
+    """Парсит ATA (колонка O) как timezone-aware datetime (Ташкент).
+    Поддерживает форматы со временем и без."""
     val = val.strip()
     if not val:
         return None
-    # Убираем временную часть если есть: "12.04.2026 14:30:00" → "12.04.2026"
-    val = val.split()[0]
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(val, fmt)
+            return dt.replace(tzinfo=TZ)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_date(val: str) -> date | None:
+    """Парсит ETA (колонка N) только как дату (для отображения)."""
+    val = val.strip().split()[0]  # убираем время если есть
+    if not val:
+        return None
     for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
         try:
             return datetime.strptime(val, fmt).date()
@@ -99,11 +114,20 @@ def parse_date(val: str) -> date | None:
 
 
 # ─── Формирование сводки ──────────────────────────────────────────────────────
-def build_report(rows: list[list[str]], today: date, project: str, project_name: str) -> str:
+def build_report(rows: list[list[str]], report_dt: datetime, project: str, project_name: str) -> str:
+    """
+    Окно «прибывших»: от вчерашних 12:00 до сегодняшних 12:00 (Ташкент).
+
+    ATA в окне             → ✅ Прибыли сегодня
+    ATA пустая / > 12:00   → ⏳ Ожидаются (с ETA из колонки N)
+    ATA < вчера 12:00      → не показываем (уже было в прошлых сводках)
+    """
+    # Границы окна
+    prev_report_dt = report_dt - timedelta(days=1)  # вчера 12:00
+
     arrived: list[str] = []
-    # pending хранит (awb, eta_str) для показа даты ETA рядом с номером
     pending: list[tuple[str, str]] = []
-    seen: set[str] = set()  # для дедупликации по AWB
+    seen: set[str] = set()
 
     for i, row in enumerate(rows):
         if i == 0:
@@ -119,21 +143,25 @@ def build_report(rows: list[list[str]], today: date, project: str, project_name:
         seen.add(awb)
 
         ata_raw = row[COL_ETA].strip() if len(row) > COL_ETA else ""
-        ata = parse_date(ata_raw)
+        ata_dt = parse_ata(ata_raw)
 
-        # ETA (колонка N=13) — плановая дата, показываем рядом с AWB в ожидаемых
+        # ETA (колонка N=13) — плановая дата/время, показываем рядом с AWB
         eta_display = ""
-        if len(row) > 13:
-            eta_val = row[13].strip()
-            if eta_val:
-                eta_display = eta_val
+        if len(row) > 13 and row[13].strip():
+            eta_display = row[13].strip()
 
-        if ata is None:
+        if ata_dt is None:
+            # ATA не заполнена — партия ещё в пути
             pending.append((awb, eta_display))
-        elif ata == today:
+        elif prev_report_dt < ata_dt <= report_dt:
+            # Прибыла в окне: вчера 12:00 — сегодня 12:00
             arrived.append(awb)
+        elif ata_dt > report_dt:
+            # Прилетит после текущего отчёта — в ожидаемых
+            pending.append((awb, eta_display))
+        # ata_dt <= prev_report_dt → уже показывали, пропускаем
 
-    date_str = today.strftime("%d.%m.%Y")
+    date_str = report_dt.strftime("%d.%m.%Y")
     lines = [f"📦 *{project_name}* — сводка по партиям на {date_str}\n"]
 
     if arrived:
@@ -160,8 +188,10 @@ def build_report(rows: list[list[str]], today: date, project: str, project_name:
 async def send_report(token: str, chat_id: str, project: str, project_name: str) -> None:
     try:
         rows = fetch_rows()
-        today = datetime.now(tz=TZ).date()
-        text = build_report(rows, today, project, project_name)
+        # report_dt — сегодня в 12:00 по Ташкенту (граница окна прибывших)
+        now = datetime.now(tz=TZ)
+        report_dt = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        text = build_report(rows, report_dt, project, project_name)
         bot = Bot(token=token)
         await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
         log.info("[%s] Сводка отправлена.", project_name)
